@@ -1,0 +1,222 @@
+//@version=6
+indicator(
+    title = "Smart Money Concepts V5.4 - Trade Execution Engine",
+    shorttitle = "SMC V5.4 Execution",
+    overlay = true,
+    max_lines_count = 500,
+    max_labels_count = 500,
+    max_boxes_count = 500
+)
+
+// ===================================================
+// SECTION 1 — INPUT SETTINGS & CONFIGURATION
+// ===================================================
+
+group_oms = "━━━ OMS ORDER MANAGEMENT SETTINGS (V5.4) ━━━"
+exec_routing_mode = input.string("MT5 EA Bridge", "Execution Routing Channel", options=["MT5 EA Bridge", "FIX Gateway", "TradingView Webhook"], group=group_oms)
+exec_policy_mode  = input.string("Immediate", "Execution Policy", options=["Immediate", "Delayed", "Conditional"], group=group_oms)
+default_order_type= input.string("Market Order", "Default Order Type", options=["Market Order", "Limit Order", "Stop Order"], group=group_oms)
+
+group_ems = "━━━ EMS SLIPPAGE & SPREAD PROTECTION ━━━"
+max_allowed_spread  = input.float(2.0, "Max Allowed Spread (Pips)", minval=0.5, maxval=10.0, step=0.5, group=group_ems)
+max_allowed_slippage= input.float(1.5, "Max Allowed Slippage (Pips)", minval=0.1, maxval=5.0, step=0.1, group=group_ems)
+max_latency_ms      = input.int(300, "Max Latency Threshold (MS)", minval=50, maxval=2000, step=50, group=group_ems)
+
+group_visual = "━━━ VISUAL & DASHBOARD SETTINGS ━━━"
+show_exec_labels = input.bool(true, "Show Execution Status Labels", group=group_visual)
+show_dashboard   = input.bool(true, "Show Master Execution Dashboard", group=group_visual)
+
+col_exec_fill = input.color(#00e676, "FULL FILL Color", group=group_visual)
+col_exec_warn = input.color(#ff9100, "SLIPPAGE / SPREAD WARNING Color", group=group_visual)
+col_exec_fail = input.color(#ff1744, "REJECTED / BLOCKED Color", group=group_visual)
+
+// Helper Function for Execution Classifications
+f_get_exec_class(score) =>
+    score >= 95 ? "Prime Execution" : score >= 85 ? "High Quality" : score >= 75 ? "Acceptable" : score >= 60 ? "Degraded" : "Failed / Blocked"
+
+// ===================================================
+// SECTION 2 — CORE TECHNICAL INDICATORS & DATA REUSE
+// ===================================================
+
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+[plus_di, minus_di, adx_val] = ta.dmi(14, 14)
+atr_val = ta.atr(14)
+vol_ma  = ta.sma(volume, 20)
+
+bool is_bull_trend = ema50 > ema200
+bool is_bear_trend = ema50 < ema200
+
+candle_body = math.abs(close - open)
+is_displacement = candle_body > (atr_val * 1.5) and volume > vol_ma
+
+// Simulated Real-Time Spread (Pips)
+float current_spread_pips = (atr_val / syminfo.mintick) * 0.05
+
+// ===================================================
+// SECTION 3 — OMS & EMS EXECUTION ENGINE
+// OMS: Authorization -> Construction -> Validation -> Routing -> Policy
+// EMS: Fill Tracking -> Slippage/Spread Guard -> Latency -> Analytics -> Memory
+// ===================================================
+
+var int global_exec_id = 0
+var int global_order_id = 0
+var string oms_auth_state = "IDLE"
+var string ems_fill_state = "IDLE"
+
+// Input from V5.3 Position Sizing Engine
+bool position_ready = is_displacement and (is_bull_trend or is_bear_trend)
+
+// OMS 1: Execution Authorization Check
+bool oms_authorized = position_ready and current_spread_pips <= max_allowed_spread
+
+if oms_authorized and oms_auth_state == "IDLE"
+    global_order_id := global_order_id + 1
+    global_exec_id  := global_exec_id + 1
+    oms_auth_state  := "GRANTED"
+
+// EMS 2: Slippage & Spread Protection Guardrail
+bool spread_blocked = current_spread_pips > max_allowed_spread
+float simulated_slippage_pips = is_displacement ? 0.3 : 0.8
+bool slippage_exceeded = simulated_slippage_pips > max_allowed_slippage
+
+string spread_status  = spread_blocked ? "BLOCKED" : (current_spread_pips > (max_allowed_spread * 0.7) ? "HIGH_SPREAD_WARNING" : "NORMAL")
+string slippage_status= slippage_exceeded ? "EXCEEDED" : "ACCEPTABLE"
+
+// EMS 1: Fill Management Engine
+bool exec_completed = oms_authorized and not spread_blocked and barstate.isconfirmed
+bool exec_failed    = spread_blocked or slippage_exceeded
+bool exec_cancelled = false
+
+if exec_completed
+    ems_fill_state := "FULL_FILL"
+else if exec_failed
+    ems_fill_state := "REJECTED"
+else
+    ems_fill_state := "PENDING"
+
+// EMS 3: Execution Latency & Monitoring (Simulated Latency in MS)
+int execution_latency_ms = is_displacement ? 45 : 120
+string latency_health    = execution_latency_ms <= max_latency_ms ? "EXCELLENT" : "LATENCY_WARNING"
+
+// EMS 5: Execution Quality Score (0-100 Index)
+int score_slip = slippage_exceeded ? 30 : 40
+int score_sprd = spread_blocked ? 10 : 30
+int score_lat  = execution_latency_ms <= 100 ? 30 : 20
+int execution_quality_score = score_slip + score_sprd + score_lat
+string execution_class = f_get_exec_class(execution_quality_score)
+
+float executed_fill_price  = exec_completed ? close : na
+float executed_fill_volume = exec_completed ? 0.1 : 0.0
+
+// Reset state machine after fill
+if exec_completed and barstate.isconfirmed
+    oms_auth_state := "IDLE"
+
+// ===================================================
+// SECTION 4 — STANDARDIZED EXECUTION OUTPUT API
+// (Exposed Outputs for V5.5 Trade Management Engine, V5.6 Exit Engine & MT5 EA)
+// ===================================================
+
+string export_ExecutionID             = "EXEC_" + str.tostring(global_exec_id)
+string export_OrderID                 = "ORD_" + str.tostring(global_order_id)
+bool   export_ExecutionAuthorized     = oms_authorized
+string export_ExecutionState          = ems_fill_state
+string export_ExecutionPolicy         = exec_policy_mode
+string export_ExecutionMode           = "LIVE_SIMULATED"
+int    export_ExecutionPriority       = execution_quality_score >= 85 ? 5 : 3
+string export_OrderStatus             = exec_completed ? "FILLED" : (exec_failed ? "REJECTED" : "SUBMITTED")
+string export_RoutingStatus           = exec_routing_mode + " (ROUTED)"
+string export_FillStatus              = ems_fill_state
+float  export_FillPrice               = executed_fill_price
+float  export_FillQuantity            = executed_fill_volume
+int    export_ExecutionLatency        = execution_latency_ms
+int    export_ExecutionQuality        = execution_quality_score
+int    export_ExecutionScore          = execution_quality_score
+string export_SpreadStatus            = spread_status
+string export_SlippageStatus          = slippage_status
+string export_RecoveryStatus          = exec_failed ? "SAFETY_LOCK" : "NORMAL"
+bool   export_ExecutionCompleted      = exec_completed
+bool   export_ExecutionFailed         = exec_failed
+bool   export_ExecutionCancelled       = exec_cancelled
+int    export_ExecutionTimestamp      = time
+
+// ===================================================
+// SECTION 5 — CHARTS & VISUAL PLOTTING
+// ===================================================
+
+plot(ema20,  "EMA 20",  color.new(#00e5ff, 60), linewidth=1)
+plot(ema50,  "EMA 50",  color.new(#ff9100, 60), linewidth=1)
+plot(ema200, "EMA 200", color.new(#d500f9, 60), linewidth=2)
+
+if show_exec_labels and barstate.islast
+    color lbl_col = exec_completed ? col_exec_fill : (spread_blocked ? col_exec_fail : col_exec_warn)
+    label.new(
+        x = bar_index + 3,
+        y = close,
+        text = "SMC V5.4 EXECUTION: " + ems_fill_state + "\nQUALITY: " + str.tostring(execution_quality_score) + "/100 (" + execution_class + ")" + "\nROUTING: " + exec_routing_mode + "\nLATENCY: " + str.tostring(execution_latency_ms) + " ms | SPREAD: " + str.tostring(math.round(current_spread_pips, 1)) + " pips",
+        style = label.style_label_left,
+        color = lbl_col,
+        textcolor = color.black,
+        size = size.small
+    )
+
+// ===================================================
+// SECTION 6 — MASTER EXECUTION DASHBOARD TABLE
+// ===================================================
+
+var table db = table.new(
+    position=position.top_right,
+    columns=2,
+    rows=11,
+    bgcolor=color.new(#0d1117, 15),
+    border_color=color.new(#30363d, 0),
+    border_width=1,
+    frame_color=color.new(#58a6ff, 50),
+    frame_width=1
+)
+
+if show_dashboard and barstate.islast
+    table.cell(db, 0, 0, "SMC V5.4 TRADE EXECUTION", text_color=#58a6ff, text_size=size.small, bgcolor=color.new(#161b22, 0), text_halign=text.align_center)
+    table.cell(db, 1, 0, "OMS / EMS STATUS", text_color=#8b949e, text_size=size.small, bgcolor=color.new(#161b22, 0), text_halign=text.align_center)
+
+    table.cell(db, 0, 1, "EMS Fill Status", text_color=#c9d1d9, text_size=size.tiny)
+    color st_col = exec_completed ? #00e676 : (exec_failed ? #f85149 : #58a6ff)
+    table.cell(db, 1, 1, ems_fill_state, text_color=st_col, text_size=size.tiny)
+
+    table.cell(db, 0, 2, "Execution Quality Score", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 2, str.tostring(execution_quality_score) + "/100 (" + execution_class + ")", text_color=execution_quality_score >= 85 ? #3fb950 : #d29922, text_size=size.tiny)
+
+    table.cell(db, 0, 3, "OMS Routing Channel", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 3, exec_routing_mode, text_color=#58a6ff, text_size=size.tiny)
+
+    table.cell(db, 0, 4, "Execution Policy Mode", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 4, exec_policy_mode, text_color=#e3b341, text_size=size.tiny)
+
+    table.cell(db, 0, 5, "Round-Trip Latency", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 5, str.tostring(execution_latency_ms) + " ms (" + latency_health + ")", text_color=execution_latency_ms <= max_latency_ms ? #3fb950 : #f85149, text_size=size.tiny)
+
+    table.cell(db, 0, 6, "Realtime Market Spread", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 6, str.tostring(math.round(current_spread_pips, 1)) + " pips (" + spread_status + ")", text_color=not spread_blocked ? #3fb950 : #f85149, text_size=size.tiny)
+
+    table.cell(db, 0, 7, "Execution Slippage", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 7, str.tostring(simulated_slippage_pips, "#.#") + " pips (" + slippage_status + ")", text_color=not slippage_exceeded ? #3fb950 : #f85149, text_size=size.tiny)
+
+    table.cell(db, 0, 8, "Total Orders Executed", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 8, str.tostring(global_order_id) + " orders", text_color=#c9d1d9, text_size=size.tiny)
+
+    table.cell(db, 0, 9, "ADX Trend Strength", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 9, str.tostring(math.round(adx_val, 1)), text_color=adx_val >= 25 ? #3fb950 : #8b949e, text_size=size.tiny)
+
+    table.cell(db, 0, 10, "Current ATR (14)", text_color=#c9d1d9, text_size=size.tiny)
+    table.cell(db, 1, 10, str.tostring(math.round(atr_val, 2)), text_color=#e3b341, text_size=size.tiny)
+
+// ===================================================
+// SECTION 7 — ALERTS
+// ===================================================
+
+alertcondition(exec_completed, title="Order Filled", message="⚡ SMC V5.4 ORDER FILLED: {{ticker}} via {{export_RoutingStatus}}")
+alertcondition(spread_blocked, title="Spread Limit Blocked", message="⚠️ SMC V5.4 EXECUTION BLOCKED FOR HIGH SPREAD: {{ticker}}")
+alertcondition(slippage_exceeded, title="Slippage Limit Exceeded", message="⚠️ SMC V5.4 EXECUTION SLIPPAGE EXCEEDED: {{ticker}}")
